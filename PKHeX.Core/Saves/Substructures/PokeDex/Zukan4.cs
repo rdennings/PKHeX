@@ -88,9 +88,9 @@ public sealed class Zukan4(SAV4 sav, Memory<byte> raw) : ZukanBase<SAV4>(sav, ra
         switch (species)
         {
             case (int)Species.Shellos: // Shellos
-                return GetDexFormValues(Data[FormOffset1 + 0], 1, 2);
+                return GetTwoFormValues(species, Data[FormOffset1 + 0]);
             case (int)Species.Gastrodon: // Gastrodon
-                return GetDexFormValues(Data[FormOffset1 + 1], 1, 2);
+                return GetTwoFormValues(species, Data[FormOffset1 + 1]);
             case (int)Species.Burmy: // Burmy
                 return GetDexFormValues(Data[FormOffset1 + 2], 2, 3);
             case (int)Species.Wormadam: // Wormadam
@@ -106,8 +106,8 @@ public sealed class Zukan4(SAV4 sav, Memory<byte> raw) : ZukanBase<SAV4>(sav, ra
         return species switch
         {
             (int)Species.Rotom => GetDexFormValues(ReadUInt32LittleEndian(Data[FormOffset2..]), 3, 6),
-            (int)Species.Shaymin => GetDexFormValues(Data[FormOffset2 + 4], 1, 2),
-            (int)Species.Giratina => GetDexFormValues(Data[FormOffset2 + 5], 1, 2),
+            (int)Species.Shaymin => GetTwoFormValues(species, Data[FormOffset2 + 4]),
+            (int)Species.Giratina => GetTwoFormValues(species, Data[FormOffset2 + 5]),
             (int)Species.Pichu when HGSS => GetDexFormValues(Data[FormOffset2 + 6], 2, 3),
             _ => [],
         };
@@ -129,10 +129,10 @@ public sealed class Zukan4(SAV4 sav, Memory<byte> raw) : ZukanBase<SAV4>(sav, ra
         switch (species)
         {
             case (int)Species.Shellos: // Shellos
-                Data[FormOffset1 + 0] = (byte)SetDexFormValues(forms, 1, 2);
+                Data[FormOffset1 + 0] = SetTwoFormValues(forms);
                 return;
             case (int)Species.Gastrodon: // Gastrodon
-                Data[FormOffset1 + 1] = (byte)SetDexFormValues(forms, 1, 2);
+                Data[FormOffset1 + 1] = SetTwoFormValues(forms);
                 return;
             case (int)Species.Burmy: // Burmy
                 Data[FormOffset1 + 2] = (byte)SetDexFormValues(forms, 2, 3);
@@ -160,10 +160,10 @@ public sealed class Zukan4(SAV4 sav, Memory<byte> raw) : ZukanBase<SAV4>(sav, ra
                 WriteUInt32LittleEndian(Data[FormOffset2..], value);
                 return;
             case (int)Species.Shaymin: // Shaymin
-                Data[FormOffset2 + 4] = (byte)SetDexFormValues(forms, 1, 2);
+                Data[FormOffset2 + 4] = SetTwoFormValues(forms);
                 return;
             case (int)Species.Giratina: // Giratina
-                Data[FormOffset2 + 5] = (byte)SetDexFormValues(forms, 1, 2);
+                Data[FormOffset2 + 5] = SetTwoFormValues(forms);
                 return;
             case (int)Species.Pichu when HGSS: // Pichu
                 Data[FormOffset2 + 6] = (byte)SetDexFormValues(forms, 2, 3);
@@ -178,34 +178,70 @@ public sealed class Zukan4(SAV4 sav, Memory<byte> raw) : ZukanBase<SAV4>(sav, ra
         for (int i = 0; i < Forms.Length; i++)
         {
             int val = (int)(Value >> (i * BitsPerForm)) & n1;
-            if (n1 == val && BitsPerForm > 1)
-                Forms[i] = byte.MaxValue;
+            if (n1 == val)
+                Forms[i] = FORM_NONE;
             else
                 Forms[i] = (byte)val;
         }
-
-        // (BitsPerForm > 1) was already handled, handle (BitsPerForm == 1)
-        if (BitsPerForm == 1 && Forms[0] == Forms[1] && Forms[0] == 1)
-            Forms[0] = Forms[1] = byte.MaxValue;
 
         return Forms;
     }
 
     private static uint SetDexFormValues(ReadOnlySpan<byte> Forms, int BitsPerForm, int readCt)
     {
-        int n1 = 0xFF >> (8 - BitsPerForm);
-        uint Value = 0xFFFFFFFF << (readCt * BitsPerForm);
+        if (Forms.Length > readCt)
+            throw new ArgumentOutOfRangeException(nameof(readCt), "Array count should be less than bitfield count");
+
+        // Empty slots are all-ones, the same as the game's initialized value.
+        uint n1 = 0xFFu >> (8 - BitsPerForm);
+        uint Value = uint.MaxValue;
         for (int i = 0; i < Forms.Length; i++)
         {
-            int val = Forms[i];
-            if (val == -1)
-                val = n1;
+            var form = Forms[i];
+            if (form == FORM_NONE)
+                continue;
 
-            Value |= (uint)(val << (BitsPerForm * i));
-            if (i >= readCt)
-                throw new ArgumentOutOfRangeException(nameof(readCt), "Array count should be less than bitfield count");
+            int shift = BitsPerForm * i;
+            Value &= ~(n1 << shift);
+            Value |= (form & n1) << shift;
         }
         return Value;
+    }
+
+    /// <summary>
+    /// Gets the seen forms of a species that stores its two forms as 1-bit values (Shellos, Gastrodon, Shaymin, Giratina).
+    /// </summary>
+    /// <remarks>
+    /// Bit 0 is the first form seen, and bit 1 is the second.
+    /// If both bits are the same, only one form has been seen; an unseen species has no forms seen.
+    /// </remarks>
+    private byte[] GetTwoFormValues(ushort species, byte value)
+    {
+        if (!GetSeen(species))
+            return [FORM_NONE, FORM_NONE];
+
+        var first = (byte)(value & 1);
+        var second = (byte)((value >> 1) & 1);
+        if (first == second)
+            return [first, FORM_NONE];
+        return [first, second];
+    }
+
+    /// <summary>
+    /// Gets the value for a species that stores its two forms as 1-bit values (Shellos, Gastrodon, Shaymin, Giratina).
+    /// </summary>
+    /// <remarks>
+    /// The game writes the first form seen to both bits, then a second (different) form to bit 1.
+    /// The upper bits are never written by the game, and remain set from initialization.
+    /// </remarks>
+    private static byte SetTwoFormValues(ReadOnlySpan<byte> forms)
+    {
+        if (forms.Length == 0 || forms[0] == FORM_NONE)
+            return byte.MaxValue;
+
+        var first = forms[0] & 1;
+        var second = forms.Length > 1 && forms[1] != FORM_NONE ? forms[1] & 1 : first;
+        return (byte)(0b1111_1100 | (second << 1) | first);
     }
 
     private static bool TryInsertForm(Span<byte> forms, byte form)
@@ -283,15 +319,18 @@ public sealed class Zukan4(SAV4 sav, Memory<byte> raw) : ZukanBase<SAV4>(sav, ra
         var gender = pk.Gender;
         var form = pk.Form;
         var language = pk.Language;
-        SetDex(species, gender, form, language);
+        SetDex(species, gender, form, language, pk.PID);
     }
 
-    private void SetDex(ushort species, byte gender, byte form, int language)
+    private void SetDex(ushort species, byte gender, byte form, int language, uint pid)
     {
+        // Same order as the game: first-seen data and forms are updated before the seen flag is set.
+        if (species == (int)Species.Spinda && !GetSeen(species))
+            SpindaPID = pid;
         SetCaught(species);
         SetSeenGender(species, gender);
-        SetSeen(species);
         SetForms(species, form, gender);
+        SetSeen(species);
         SetLanguage(species, language);
     }
 
